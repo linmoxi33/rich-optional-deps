@@ -1,0 +1,50 @@
+# NOTICE
+
+This repository contains a patch against **rich** v14.1.0.
+
+rich is © 2020 Will McGugan and contributors, distributed under the MIT License.
+The original license text is reproduced below, as required by its terms.
+
+```
+MIT License
+
+Copyright (c) 2020 Will McGugan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Files derived from rich
+
+The following files in `rich/` are modified versions of upstream rich 14.1.0
+sources. See `patches/0001-optional-deps.patch` for the exact changes.
+
+| File | Change |
+|---|---|
+| `rich/syntax.py` | Pygments imports made lazy; ANSI theme fallback added |
+| `rich/traceback.py` | Pygments imports made lazy; theme table keyed by tuples |
+| `rich/markdown.py` | markdown-it-py imported at construction; actionable error |
+
+The following file is new and original to this repository:
+
+| File | Purpose |
+|---|---|
+| `rich/_syntax_themes.py` | ANSI theme tables keyed by plain tuples, derived from the theme tables that upstream ships inside `rich/syntax.py` |
+
+`tests/test_optional_deps.py`, `tools/*.py`, and `assets/make_cover.py` are
+original to this repository.
