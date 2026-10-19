@@ -1,0 +1,437 @@
+--- a/rich/syntax.py
++++ b/rich/syntax.py
+@@ -4,9 +4,12 @@
+ import re
+ import sys
+ import textwrap
++import warnings
+ from abc import ABC, abstractmethod
++from functools import lru_cache
+ from pathlib import Path
+ from typing import (
++    TYPE_CHECKING,
+     Any,
+     Dict,
+     Iterable,
+@@ -20,28 +23,15 @@
+     Union,
+ )
+ 
+-from pygments.lexer import Lexer
+-from pygments.lexers import get_lexer_by_name, guess_lexer_for_filename
+-from pygments.style import Style as PygmentsStyle
+-from pygments.styles import get_style_by_name
+-from pygments.token import (
+-    Comment,
+-    Error,
+-    Generic,
+-    Keyword,
+-    Name,
+-    Number,
+-    Operator,
+-    String,
+-    Token,
+-    Whitespace,
+-)
+-from pygments.util import ClassNotFound
++if TYPE_CHECKING:  # pragma: no cover
++    from pygments.lexer import Lexer
++    from pygments.style import Style as PygmentsStyle
+ 
+ from rich.containers import Lines
+ from rich.padding import Padding, PaddingDimensions
+ 
+ from ._loop import loop_first
++from ._syntax_themes import ANSI_DARK, ANSI_LIGHT, RICH_SYNTAX_THEMES
+ from .cells import cell_len
+ from .color import Color, blend_rgb
+ from .console import Console, ConsoleOptions, JustifyMethod, RenderResult
+@@ -56,69 +46,58 @@
+ WINDOWS = sys.platform == "win32"
+ DEFAULT_THEME = "monokai"
+ 
+-# The following styles are based on https://github.com/pygments/pygments/blob/master/pygments/formatters/terminal.py
+-# A few modifications were made
++# The ANSI theme tables live in ``_syntax_themes`` so that they can be used
++# without importing Pygments.  They are re-exported here for backwards
++# compatibility.
++NUMBERS_COLUMN_DEFAULT_PADDING = 2
+ 
+-ANSI_LIGHT: Dict[TokenType, Style] = {
+-    Token: Style(),
+-    Whitespace: Style(color="white"),
+-    Comment: Style(dim=True),
+-    Comment.Preproc: Style(color="cyan"),
+-    Keyword: Style(color="blue"),
+-    Keyword.Type: Style(color="cyan"),
+-    Operator.Word: Style(color="magenta"),
+-    Name.Builtin: Style(color="cyan"),
+-    Name.Function: Style(color="green"),
+-    Name.Namespace: Style(color="cyan", underline=True),
+-    Name.Class: Style(color="green", underline=True),
+-    Name.Exception: Style(color="cyan"),
+-    Name.Decorator: Style(color="magenta", bold=True),
+-    Name.Variable: Style(color="red"),
+-    Name.Constant: Style(color="red"),
+-    Name.Attribute: Style(color="cyan"),
+-    Name.Tag: Style(color="bright_blue"),
+-    String: Style(color="yellow"),
+-    Number: Style(color="blue"),
+-    Generic.Deleted: Style(color="bright_red"),
+-    Generic.Inserted: Style(color="green"),
+-    Generic.Heading: Style(bold=True),
+-    Generic.Subheading: Style(color="magenta", bold=True),
+-    Generic.Prompt: Style(bold=True),
+-    Generic.Error: Style(color="bright_red"),
+-    Error: Style(color="red", underline=True),
+-}
+-
+-ANSI_DARK: Dict[TokenType, Style] = {
+-    Token: Style(),
+-    Whitespace: Style(color="bright_black"),
+-    Comment: Style(dim=True),
+-    Comment.Preproc: Style(color="bright_cyan"),
+-    Keyword: Style(color="bright_blue"),
+-    Keyword.Type: Style(color="bright_cyan"),
+-    Operator.Word: Style(color="bright_magenta"),
+-    Name.Builtin: Style(color="bright_cyan"),
+-    Name.Function: Style(color="bright_green"),
+-    Name.Namespace: Style(color="bright_cyan", underline=True),
+-    Name.Class: Style(color="bright_green", underline=True),
+-    Name.Exception: Style(color="bright_cyan"),
+-    Name.Decorator: Style(color="bright_magenta", bold=True),
+-    Name.Variable: Style(color="bright_red"),
+-    Name.Constant: Style(color="bright_red"),
+-    Name.Attribute: Style(color="bright_cyan"),
+-    Name.Tag: Style(color="bright_blue"),
+-    String: Style(color="yellow"),
+-    Number: Style(color="bright_blue"),
+-    Generic.Deleted: Style(color="bright_red"),
+-    Generic.Inserted: Style(color="bright_green"),
+-    Generic.Heading: Style(bold=True),
+-    Generic.Subheading: Style(color="bright_magenta", bold=True),
+-    Generic.Prompt: Style(bold=True),
+-    Generic.Error: Style(color="bright_red"),
+-    Error: Style(color="red", underline=True),
+-}
+ 
+-RICH_SYNTAX_THEMES = {"ansi_light": ANSI_LIGHT, "ansi_dark": ANSI_DARK}
+-NUMBERS_COLUMN_DEFAULT_PADDING = 2
++class MissingPygmentsError(ImportError):
++    """Raised when a Pygments-dependent feature is used without Pygments installed.
++
++    Rich's built-in ``ansi_light`` / ``ansi_dark`` themes work without Pygments.
++    Everything else (Pygments themes, lexer based highlighting, lexer guessing)
++    requires the optional ``pygments`` dependency.
++    """
++
++
++def _require_pygments(feature: str) -> None:
++    """Raise a helpful error if Pygments is not importable."""
++    if not _pygments_available():
++        raise MissingPygmentsError(
++            f"{feature} requires the optional 'pygments' dependency.\n"
++            "Install it with:  pip install 'rich[syntax]'\n"
++            "Or use one of the built-in themes ('ansi_light' / 'ansi_dark'), which "
++            "work without Pygments."
++        )
++
++
++@lru_cache(maxsize=1)
++def _pygments_available() -> bool:
++    """Whether the optional Pygments dependency can be imported."""
++    try:
++        import pygments  # noqa: F401
++    except ImportError:  # pragma: no cover - depends on install environment
++        return False
++    return True
++
++
++def _warn_pygments_fallback(theme: str) -> None:
++    """Warn once when a Pygments theme is unavailable and we fall back."""
++    global _warned_about_pygments
++    if _warned_about_pygments:
++        return
++    _warned_about_pygments = True
++    warnings.warn(
++        f"Syntax theme {theme!r} requires the optional 'pygments' dependency, "
++        "which is not installed. Falling back to the built-in 'ansi_dark' theme. "
++        "Install Pygments for full theme support:  pip install 'rich[syntax]'",
++        UserWarning,
++        stacklevel=3,
++    )
++
++
++_warned_about_pygments = False
+ 
+ 
+ class SyntaxTheme(ABC):
+@@ -139,6 +118,10 @@
+     """Syntax theme that delegates to Pygments theme."""
+ 
+     def __init__(self, theme: Union[str, Type[PygmentsStyle]]) -> None:
++        _require_pygments("Pygments syntax themes")
++        from pygments.styles import get_style_by_name
++        from pygments.util import ClassNotFound
++
+         self._style_cache: Dict[TokenType, Style] = {}
+         if isinstance(theme, str):
+             try:
+@@ -263,12 +246,21 @@
+ 
+     @classmethod
+     def get_theme(cls, name: Union[str, SyntaxTheme]) -> SyntaxTheme:
+-        """Get a syntax theme instance."""
++        """Get a syntax theme instance.
++
++        Built-in ``ansi_light`` / ``ansi_dark`` themes work without Pygments.
++        Any other theme name requires the optional Pygments dependency; when it
++        is missing, this falls back to ``ansi_dark`` and emits a warning rather
++        than raising, so that rendering still produces output.
++        """
+         if isinstance(name, SyntaxTheme):
+             return name
+         theme: SyntaxTheme
+         if name in RICH_SYNTAX_THEMES:
+             theme = ANSISyntaxTheme(RICH_SYNTAX_THEMES[name])
++        elif not _pygments_available():
++            _warn_pygments_fallback(name)
++            theme = ANSISyntaxTheme(RICH_SYNTAX_THEMES["ansi_dark"])
+         else:
+             theme = PygmentsSyntaxTheme(name)
+         return theme
+@@ -392,7 +384,14 @@
+ 
+         Returns:
+             str: The name of the Pygments lexer that best matches the supplied path/code.
++                Returns ``"default"`` when Pygments is not installed.
+         """
++        try:
++            from pygments.lexers import get_lexer_by_name, guess_lexer_for_filename
++            from pygments.util import ClassNotFound
++        except ImportError:  # pragma: no cover - depends on install environment
++            return "default"
++
+         lexer: Optional[Lexer] = None
+         lexer_name = "default"
+         if code:
+@@ -440,10 +439,21 @@
+         """The lexer for this syntax, or None if no lexer was found.
+ 
+         Tries to find the lexer by name if a string was passed to the constructor.
++        Returns ``None`` when the name cannot be resolved, including when the
++        optional Pygments dependency is not installed.
+         """
+ 
+-        if isinstance(self._lexer, Lexer):
++        # A Lexer instance passed by the caller is used as-is.  It necessarily
++        # means Pygments is already imported, so no extra import is needed here.
++        if not isinstance(self._lexer, str):
+             return self._lexer
++
++        try:
++            from pygments.lexers import get_lexer_by_name
++            from pygments.util import ClassNotFound
++        except ImportError:  # pragma: no cover - depends on install environment
++            return None
++
+         try:
+             return get_lexer_by_name(
+                 self._lexer,
+@@ -455,8 +465,17 @@
+             return None
+ 
+     @property
+-    def default_lexer(self) -> Lexer:
+-        """A Pygments Lexer to use if one is not specified or invalid."""
++    def default_lexer(self) -> Optional[Lexer]:
++        """A Pygments Lexer to use if one is not specified or invalid.
++
++        Returns ``None`` when Pygments is not installed, in which case the code
++        is rendered as unstyled text rather than failing.
++        """
++        try:
++            from pygments.lexers import get_lexer_by_name
++        except ImportError:  # pragma: no cover - depends on install environment
++            return None
++
+         return get_lexer_by_name(
+             "text",
+             stripnl=False,
+@@ -575,7 +594,7 @@
+         background_color = background_style.bgcolor
+         if background_color is None or background_color.is_system_defined:
+             return Color.default()
+-        foreground_color = self._get_token_color(Token.Text)
++        foreground_color = self._get_token_color(("Text",))
+         if foreground_color is None or foreground_color.is_system_defined:
+             return foreground_color or Color.default()
+         new_color = blend_rgb(
+@@ -604,13 +623,13 @@
+         if console.color_system in ("256", "truecolor"):
+             number_style = Style.chain(
+                 background_style,
+-                self._theme.get_style_for_token(Token.Text),
++                self._theme.get_style_for_token(("Text",)),
+                 Style(color=self._get_line_numbers_color()),
+                 self.background_style,
+             )
+             highlight_number_style = Style.chain(
+                 background_style,
+-                self._theme.get_style_for_token(Token.Text),
++                self._theme.get_style_for_token(("Text",)),
+                 Style(bold=True, color=self._get_line_numbers_color(0.9)),
+                 self.background_style,
+             )
+@@ -678,7 +697,7 @@
+             # Simple case of just rendering text
+             style = (
+                 self._get_base_style()
+-                + self._theme.get_style_for_token(Comment)
++                + self._theme.get_style_for_token(("Comment",))
+                 + Style(dim=True)
+                 + self.background_style
+             )
+@@ -714,7 +733,7 @@
+         if self.indent_guides and not options.ascii_only:
+             style = (
+                 self._get_base_style()
+-                + self._theme.get_style_for_token(Comment)
++                + self._theme.get_style_for_token(("Comment",))
+                 + Style(dim=True)
+                 + self.background_style
+             )
+--- a/rich/traceback.py
++++ b/rich/traceback.py
+@@ -20,12 +20,6 @@
+     Union,
+ )
+ 
+-from pygments.lexers import guess_lexer_for_filename
+-from pygments.token import Comment, Keyword, Name, Number, Operator, String
+-from pygments.token import Text as TextToken
+-from pygments.token import Token
+-from pygments.util import ClassNotFound
+-
+ from . import pretty
+ from ._loop import loop_first_last, loop_last
+ from .columns import Columns
+@@ -609,22 +603,25 @@
+ 
+         traceback_theme = Theme(
+             {
+-                "pretty": token_style(TextToken),
+-                "pygments.text": token_style(Token),
+-                "pygments.string": token_style(String),
+-                "pygments.function": token_style(Name.Function),
+-                "pygments.number": token_style(Number),
+-                "repr.indent": token_style(Comment) + Style(dim=True),
+-                "repr.str": token_style(String),
+-                "repr.brace": token_style(TextToken) + Style(bold=True),
+-                "repr.number": token_style(Number),
+-                "repr.bool_true": token_style(Keyword.Constant),
+-                "repr.bool_false": token_style(Keyword.Constant),
+-                "repr.none": token_style(Keyword.Constant),
+-                "scope.border": token_style(String.Delimiter),
+-                "scope.equals": token_style(Operator),
+-                "scope.key": token_style(Name),
+-                "scope.key.special": token_style(Name.Constant) + Style(dim=True),
++                # Token paths are plain tuples so that this works with themes that
++                # do not depend on Pygments (see ``_syntax_themes``).
++                "pretty": token_style(("Text",)),
++                "pygments.text": token_style(()),
++                "pygments.string": token_style(("Literal", "String")),
++                "pygments.function": token_style(("Name", "Function")),
++                "pygments.number": token_style(("Literal", "Number")),
++                "repr.indent": token_style(("Comment",)) + Style(dim=True),
++                "repr.str": token_style(("Literal", "String")),
++                "repr.brace": token_style(("Text",)) + Style(bold=True),
++                "repr.number": token_style(("Literal", "Number")),
++                "repr.bool_true": token_style(("Keyword", "Constant")),
++                "repr.bool_false": token_style(("Keyword", "Constant")),
++                "repr.none": token_style(("Keyword", "Constant")),
++                "scope.border": token_style(("Literal", "String", "Delimiter")),
++                "scope.equals": token_style(("Operator",)),
++                "scope.key": token_style(("Name",)),
++                "scope.key.special": token_style(("Name", "Constant"))
++                + Style(dim=True),
+             },
+             inherit=False,
+         )
+@@ -736,8 +733,22 @@
+             first_line = code[:new_line_index] if new_line_index != -1 else code
+             if first_line.startswith("#!") and "python" in first_line.lower():
+                 return "python"
++
++        known_lexer = cls.LEXERS.get(ext)
++        if known_lexer:
++            return known_lexer
++
++        # Pygments is optional: without it we fall back to plain text, which is
++        # what the renderer does for any unknown lexer anyway.
++        try:
++            from pygments.lexers import guess_lexer_for_filename
++            from pygments.util import ClassNotFound
++        except ImportError:  # pragma: no cover - depends on install environment
++            return "text"
++
+         try:
+-            return cls.LEXERS.get(ext) or guess_lexer_for_filename(filename, code).name
++            # ``.name`` is typed as Any because Pygments ships no type information.
++            return str(guess_lexer_for_filename(filename, code).name)
+         except ClassNotFound:
+             return "text"
+ 
+--- a/rich/markdown.py
++++ b/rich/markdown.py
+@@ -1,10 +1,10 @@
+ from __future__ import annotations
+ 
+ import sys
+-from typing import ClassVar, Iterable, get_args
++from typing import TYPE_CHECKING, ClassVar, Iterable, get_args
+ 
+-from markdown_it import MarkdownIt
+-from markdown_it.token import Token
++if TYPE_CHECKING:  # pragma: no cover
++    from markdown_it.token import Token
+ 
+ from rich.table import Table
+ 
+@@ -541,6 +541,14 @@
+         inline_code_lexer: str | None = None,
+         inline_code_theme: str | None = None,
+     ) -> None:
++        try:
++            from markdown_it import MarkdownIt
++        except ImportError:  # pragma: no cover - depends on install environment
++            raise ImportError(
++                "Rendering Markdown requires the optional 'markdown-it-py' "
++                "dependency.\nInstall it with:  pip install 'rich[markdown]'"
++            ) from None
++
+         parser = MarkdownIt().enable("strikethrough").enable("table")
+         self.markup = markup
+         self.parsed = parser.parse(markup)
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -28,11 +28,17 @@
+ 
+ [tool.poetry.dependencies]
+ python = ">=3.8.0"
+-pygments = "^2.13.0"
++pygments = { version = "^2.13.0", optional = true }
+ ipywidgets = { version = ">=7.5.1,<9", optional = true }
+-markdown-it-py = ">=2.2.0"
++markdown-it-py = { version = ">=2.2.0", optional = true }
+ 
+ [tool.poetry.extras]
++# Syntax highlighting with Pygments themes / lexers, plus lexer guessing.
++syntax = ["pygments"]
++# Markdown rendering.
++markdown = ["markdown-it-py"]
++# Everything optional.
++all = ["pygments", "markdown-it-py"]
+ jupyter = ["ipywidgets"]
+ 
+ [tool.poetry.dev-dependencies]
